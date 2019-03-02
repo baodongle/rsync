@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 import os
+import difflib
 from argparse import ArgumentParser
-
-
-"""./rsync.py [OPTIONS] SRC_FILE DESTINATION"""
 
 
 def parse_argument():
@@ -60,11 +58,27 @@ def copy_symlink(source, destination):
     os.symlink(linkto, destination)
 
 
+def copy_hardlink(source, destination):
+    if os.path.exists(destination):
+        os.unlink(destination)
+    os.link(source, destination)
+
+
 def copy_file(source, destination):
-    source_size = os.path.getsize(source)
+    src_size = os.path.getsize(source)
+    dst_size = os.path.getsize(destination)
     from_file = os.open(source, os.O_RDONLY)
-    to_file = os.open(destination, os.O_RDWR | os.O_TRUNC)
-    os.sendfile(to_file, from_file, 0, source_size)
+    to_file = os.open(destination, os.O_APPEND)
+    context_src = os.read(from_file, src_size)
+    context_dst = os.read(to_file, dst_size)
+    position_diff = 0
+    diffs = list(difflib.ndiff(context_src, context_dst))
+    for i in range(len(diffs)):
+        if diffs[i][0] in ['+', '-']:
+            position_diff = i
+            break
+    print(position_diff)
+    os.sendfile(to_file, from_file, position_diff, source_size)
     os.close(from_file)
     os.close(to_file)
 
@@ -79,6 +93,8 @@ def preserve(source, destination):
 def sync_file(source, destination):
     if os.path.islink(source):
         copy_symlink(source, destination)
+    elif os.stat(source).st_ino > 1:
+        copy_hardlink(source, destination)
     else:
         copy_file(source, destination)
         preserve(source, destination)
