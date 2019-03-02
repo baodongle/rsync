@@ -68,7 +68,7 @@ def copy_file(source, destination):
     src_size = os.path.getsize(source)
     dst_size = os.path.getsize(destination)
     from_file = os.open(source, os.O_RDONLY)
-    to_file = os.open(destination, os.O_APPEND)
+    to_file = os.open(destination, os.O_RDWR)
     context_src = os.read(from_file, src_size)
     context_dst = os.read(to_file, dst_size)
     position_diff = 0
@@ -77,8 +77,7 @@ def copy_file(source, destination):
         if diffs[i][0] in ['+', '-']:
             position_diff = i
             break
-    print(position_diff)
-    os.sendfile(to_file, from_file, position_diff, source_size)
+    os.sendfile(to_file, from_file, position_diff, src_size - position_diff)
     os.close(from_file)
     os.close(to_file)
 
@@ -93,11 +92,11 @@ def preserve(source, destination):
 def sync_file(source, destination):
     if os.path.islink(source):
         copy_symlink(source, destination)
-    elif os.stat(source).st_ino > 1:
+    elif os.stat(source).st_nlink > 1:
         copy_hardlink(source, destination)
     else:
-        copy_file(source, destination)
         preserve(source, destination)
+        copy_file(source, destination)
 
 
 def copy_tree(source, destination):
@@ -118,21 +117,28 @@ def copy_tree(source, destination):
 
 def rsync(checksum, update, source, destination):
     if os.path.isfile(source):
-        # 1 file source:
-        create_destination_file(destination)
+        try:
+            # 1 file source:
+            create_destination_file(destination)
 
-        if os.path.isfile(destination):
-            # 1 file -> 1 file:
-            if need_update(checksum, update, source, destination):
-                sync_file(source, destination)
-        elif os.path.isdir(destination):
-            # 1 file -> 1 dir
-            target = os.path.join(destination, os.path.basename(source))
-            create_destination_file(target)
-            sync_file(source, target)
-        else:
-            raise FileNotFoundError("No such file or directory: \
-                                    '%s'" % destination)
+            if os.path.isfile(destination):
+                # 1 file -> 1 file:
+                if need_update(checksum, update, source, destination):
+                    sync_file(source, destination)
+            elif os.path.isdir(destination):
+                # 1 file -> 1 dir
+                target = os.path.join(destination, os.path.basename(source))
+                create_destination_file(target)
+                sync_file(source, target)
+        except PermissionError:
+            print(("rsync: send_files failed to open \"%s\": "
+                   "Permission denied (13)" % os.path.realpath(source)))
+
+    elif os.path.isdir(source):
+        pass
+    else:
+        print("rsync: link_stat \"%s\" failed: No such file or directory (2)"
+              % os.path.realpath(source))
 
     # else:
     #     if os.path.isdir(destination):
