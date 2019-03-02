@@ -11,8 +11,10 @@ def parse_argument():
                         help="skip based on checksum, not mod-time & size")
     parser.add_argument('-u', '--update', action='store_true',
                         help="skip files that are newer on the receiver")
-    parser.add_argument("source", type=str)
-    parser.add_argument("destination", type=str)
+    parser.add_argument('-r', '--recursive', action='store_true',
+                        help="recurse into directories")
+    parser.add_argument("source", nargs='+', metavar="SRC_FILE", type=str)
+    parser.add_argument("destination", metavar="DESTINATION", type=str)
     args = parser.parse_args()
     return args
 
@@ -37,16 +39,18 @@ def get_checksum(file):
     return '%2X' % (rem & 0xFF)
 
 
-def need_update(checksum, update, source, destination):
+def need_update(args, source, destination):
     src_stat = os.stat(source)
     dst_stat = os.stat(destination)
-    if update:
+    if args.update:
+        # With '-u' option:
         if dst_stat.st_mtime > src_stat.st_mtime:
             return False
-    if checksum:
+    if args.checksum:
         # With '-c' option:
         return not get_checksum(source) == get_checksum(destination)
     else:
+        # Default:
         return not (src_stat.st_mtime == dst_stat.st_mtime and
                     src_stat.st_size == dst_stat.st_size)
 
@@ -67,26 +71,27 @@ def copy_hardlink(source, destination):
 def copy_file(source, destination):
     src_size = os.path.getsize(source)
     dst_size = os.path.getsize(destination)
+
     from_file = os.open(source, os.O_RDONLY)
     to_file = os.open(destination, os.O_RDWR)
-    context_src = os.read(from_file, src_size)
-    context_dst = os.read(to_file, dst_size)
-    position_diff = 0
+    context_src = os.read(from_file, src_size).decode()
+    context_dst = os.read(to_file, dst_size).decode()
+
+    position_diff = None
     diffs = list(difflib.ndiff(context_src, context_dst))
     for i in range(len(diffs)):
         if diffs[i][0] in ['+', '-']:
             position_diff = i
             break
-    os.sendfile(to_file, from_file, position_diff, src_size - position_diff)
+
+    if position_diff:
+        count = src_size - position_diff
+    else:
+        count = src_size
+
+    os.sendfile(to_file, from_file, position_diff, count)
     os.close(from_file)
     os.close(to_file)
-
-
-def preserve(source, destination):
-    # preserve permissions and modification times:
-    stat_source = os.stat(source)
-    os.utime(destination, (stat_source.st_atime, stat_source.st_mtime))
-    os.chmod(destination, stat_source.st_mode)
 
 
 def sync_file(source, destination):
@@ -95,27 +100,22 @@ def sync_file(source, destination):
     elif os.stat(source).st_nlink > 1:
         copy_hardlink(source, destination)
     else:
-        preserve(source, destination)
+        stat_source = os.stat(source)
+        os.chmod(destination, stat_source.st_mode)
         copy_file(source, destination)
+        os.utime(destination, (stat_source.st_atime, stat_source.st_mtime))
 
 
 def copy_tree(source, destination):
-    list_dir = [f.name for f in os.scandir(destination)]
+    list_dir = [f.name for f in os.scandir(source)]
     for item in list_dir:
         src = os.path.join(source, item)
         dst = os.path.join(destination, item)
-        if os.path.islink(src):
-            if os.path.lexists(dst):
-                os.unlink(dst)
-            os.symlink(os.readlink(src), dst)
-            preserve(src, dst)
-        elif os.path.isdir(src):
-            copy_tree(src, dst)
-        else:
-            copy_file(source, destination)
+        create_destination_file(dst)
+        sync_file(src, dst)
 
 
-def rsync(checksum, update, source, destination):
+def rsync(args, source, destination):
     if os.path.isfile(source):
         try:
             # 1 file source:
@@ -123,7 +123,7 @@ def rsync(checksum, update, source, destination):
 
             if os.path.isfile(destination):
                 # 1 file -> 1 file:
-                if need_update(checksum, update, source, destination):
+                if need_update(args, source, destination):
                     sync_file(source, destination)
             elif os.path.isdir(destination):
                 # 1 file -> 1 dir
@@ -135,18 +135,19 @@ def rsync(checksum, update, source, destination):
                    "Permission denied (13)" % os.path.realpath(source)))
 
     elif os.path.isdir(source):
-        pass
+        dst_path = os.path.join(destination, source)
+        if not os.path.exists(dst_path):
+            os.mkdir(dst_path)
+        copy_tree(source, dst_path)
     else:
         print("rsync: link_stat \"%s\" failed: No such file or directory (2)"
               % os.path.realpath(source))
 
-    # else:
-    #     if os.path.isdir(destination):
-    #         copy_tree(source, destination)
-    #     else:
-    #         copy_file(source, destination)
-
 
 if __name__ == "__main__":
     args = parse_argument()
-    rsync(args.checksum, args.update, args.source, args.destination)
+    if isinstance(args.source, list):
+        for source in args.source:
+            rsync(args, source, args.destination)
+    else:
+        rsync(args, args.source, args.destination)
